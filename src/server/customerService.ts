@@ -6,6 +6,7 @@ import { config } from "./config";
 import { getDb, nowIso } from "./db";
 import { badRequest, notFound } from "./errors";
 import { mapOrder } from "./mappers";
+import { redactOrderSecrets, revealOrderSecrets } from "./security";
 import { releaseExpiredReservations } from "./storeService";
 
 const id = customAlphabet("0123456789abcdefghijklmnopqrstuvwxyz", 12);
@@ -31,29 +32,29 @@ function issueToken(customer: Customer) {
   );
 }
 
-export function registerCustomer(input: { email: string; password: string; name?: string }) {
-  const db = getDb();
+export async function registerCustomer(input: { email: string; password: string; name?: string }) {
+  const db = await getDb();
   const email = normalizeEmail(input.email);
   if (!email.includes("@")) throw badRequest("请输入有效邮箱");
   if (input.password.length < 6) throw badRequest("密码至少 6 位");
 
-  const exists = db.prepare("SELECT id FROM customers WHERE email = ?").get(email);
+  const exists = await db.get("SELECT id FROM customers WHERE email = ?", [email]);
   if (exists) throw badRequest("该邮箱已注册");
 
   const customerId = id();
   const createdAt = nowIso();
-  db.prepare(`
+  await db.run(`
     INSERT INTO customers (id, email, name, password_hash, created_at)
     VALUES (?, ?, ?, ?, ?)
-  `).run(customerId, email, input.name?.trim() || email.split("@")[0], bcrypt.hashSync(input.password, 12), createdAt);
+  `, [customerId, email, input.name?.trim() || email.split("@")[0], bcrypt.hashSync(input.password, 12), createdAt]);
 
-  const customer = mapCustomer(db.prepare("SELECT * FROM customers WHERE id = ?").get(customerId));
+  const customer = mapCustomer(await db.get("SELECT * FROM customers WHERE id = ?", [customerId]));
   return { token: issueToken(customer), user: customer };
 }
 
-export function loginCustomer(input: { email: string; password: string }) {
+export async function loginCustomer(input: { email: string; password: string }) {
   const email = normalizeEmail(input.email);
-  const row = getDb().prepare("SELECT * FROM customers WHERE email = ?").get(email) as any;
+  const row = await (await getDb()).get<any>("SELECT * FROM customers WHERE email = ?", [email]);
   if (!row || !bcrypt.compareSync(input.password, row.password_hash)) {
     throw badRequest("邮箱或密码错误", "INVALID_CREDENTIALS");
   }
@@ -71,34 +72,34 @@ export function verifyCustomerToken(token: string) {
   }
 }
 
-export function getCustomerById(customerId: string) {
-  const row = getDb().prepare("SELECT * FROM customers WHERE id = ?").get(customerId);
+export async function getCustomerById(customerId: string) {
+  const row = await (await getDb()).get("SELECT * FROM customers WHERE id = ?", [customerId]);
   if (!row) throw notFound("用户不存在");
   return mapCustomer(row);
 }
 
-export function listCustomerOrders(customerId: string) {
-  releaseExpiredReservations();
-  return (getDb().prepare(`
+export async function listCustomerOrders(customerId: string) {
+  await releaseExpiredReservations();
+  return (await (await getDb()).all(`
     SELECT o.*, p.name AS product_name, p.slug AS product_slug
     FROM orders o
     JOIN products p ON p.id = o.product_id
     WHERE o.user_id = ?
     ORDER BY o.created_at DESC
     LIMIT 100
-  `).all(customerId) as any[]).map(mapOrder);
+  `, [customerId])).map(mapOrder).map(revealOrderSecrets);
 }
 
-export function listGuestOrdersByContact(contact: string) {
-  releaseExpiredReservations();
+export async function listGuestOrdersByContact(contact: string) {
+  await releaseExpiredReservations();
   const clean = contact.trim();
   if (clean.length < 3) throw badRequest("请输入下单联系方式");
-  return (getDb().prepare(`
+  return (await (await getDb()).all(`
     SELECT o.*, p.name AS product_name, p.slug AS product_slug
     FROM orders o
     JOIN products p ON p.id = o.product_id
     WHERE o.contact = ?
     ORDER BY o.created_at DESC
     LIMIT 50
-  `).all(clean) as any[]).map(mapOrder);
+  `, [clean])).map(mapOrder).map((order) => redactOrderSecrets(order, true));
 }

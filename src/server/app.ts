@@ -21,6 +21,7 @@ import {
   deletePaymentMethod,
   deleteProduct,
   getDashboard,
+  getOrderSecrets,
   getSettings,
   listAdminProducts,
   listAnnouncements,
@@ -39,6 +40,7 @@ import {
   upsertProduct,
   verifyToken
 } from "./adminService";
+import { config } from "./config";
 import { AppError } from "./errors";
 
 declare global {
@@ -68,6 +70,10 @@ const customerAuthSchema = z.object({
   email: z.string().email(),
   password: z.string().min(6),
   name: z.string().max(60).optional()
+});
+
+const mockPaymentSchema = z.object({
+  paymentToken: z.string().min(20).max(200)
 });
 
 function asyncRoute(handler: (req: Request, res: Response, next: NextFunction) => Promise<unknown> | unknown) {
@@ -127,7 +133,18 @@ function requireCustomer(req: Request, _res: Response, next: NextFunction) {
 export function createApp() {
   const app = express();
 
-  app.use(cors({ origin: true, credentials: true }));
+  app.disable("x-powered-by");
+  app.set("trust proxy", 1);
+  app.use((_req, res, next) => {
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Referrer-Policy", "same-origin");
+    res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+    next();
+  });
+  app.use(cors({
+    origin: config.corsOrigins.length > 0 ? config.corsOrigins : process.env.NODE_ENV !== "production",
+    credentials: true
+  }));
   app.use(cookieParser());
   app.use(express.json({ limit: "2mb" }));
 
@@ -135,17 +152,17 @@ export function createApp() {
     res.json({ ok: true, service: "digital-delivery-pro" });
   });
 
-  app.get("/api/store", asyncRoute((_req, res) => {
-    res.json(getStorefront());
+  app.get("/api/store", asyncRoute(async (_req, res) => {
+    res.json(await getStorefront());
   }));
 
-  app.get("/api/products/:slug", asyncRoute((req, res) => {
-    res.json(getProductBySlug(String(req.params.slug)));
+  app.get("/api/products/:slug", asyncRoute(async (req, res) => {
+    res.json(await getProductBySlug(String(req.params.slug)));
   }));
 
-  app.post("/api/orders", optionalCustomer, asyncRoute((req, res) => {
+  app.post("/api/orders", optionalCustomer, asyncRoute(async (req, res) => {
     const parsed = orderSchema.parse(req.body);
-    const order = createOrder({
+    const order = await createOrder({
       ...parsed,
       userId: req.customer?.sub,
       clientIp: req.ip
@@ -153,42 +170,44 @@ export function createApp() {
     res.status(201).json(order);
   }));
 
-  app.get("/api/orders/:orderNo", asyncRoute((req, res) => {
-    res.json(getOrderByNo(String(req.params.orderNo), {
+  app.get("/api/orders/:orderNo", optionalCustomer, asyncRoute(async (req, res) => {
+    res.json(await getOrderByNo(String(req.params.orderNo), {
       contact: req.query.contact ? String(req.query.contact) : undefined,
-      includeSecrets: true
+      customerId: req.customer?.sub,
+      includeSecrets: Boolean(req.query.contact || req.customer)
     }));
   }));
 
-  app.post("/api/payments/mock/:orderNo/confirm", asyncRoute((req, res) => {
-    res.json(confirmMockPayment(String(req.params.orderNo)));
+  app.post("/api/payments/mock/:orderNo/confirm", asyncRoute(async (req, res) => {
+    const parsed = mockPaymentSchema.parse(req.body);
+    res.json(await confirmMockPayment(String(req.params.orderNo), parsed.paymentToken));
   }));
 
-  app.post("/api/auth/register", asyncRoute((req, res) => {
+  app.post("/api/auth/register", asyncRoute(async (req, res) => {
     const parsed = customerAuthSchema.parse(req.body);
-    res.status(201).json(registerCustomer(parsed));
+    res.status(201).json(await registerCustomer(parsed));
   }));
 
-  app.post("/api/auth/login", asyncRoute((req, res) => {
+  app.post("/api/auth/login", asyncRoute(async (req, res) => {
     const parsed = customerAuthSchema.pick({ email: true, password: true }).parse(req.body);
-    res.json(loginCustomer(parsed));
+    res.json(await loginCustomer(parsed));
   }));
 
-  app.get("/api/auth/me", requireCustomer, asyncRoute((req, res) => {
-    res.json(getCustomerById(req.customer!.sub));
+  app.get("/api/auth/me", requireCustomer, asyncRoute(async (req, res) => {
+    res.json(await getCustomerById(req.customer!.sub));
   }));
 
-  app.get("/api/account/orders", requireCustomer, asyncRoute((req, res) => {
-    res.json(listCustomerOrders(req.customer!.sub));
+  app.get("/api/account/orders", requireCustomer, asyncRoute(async (req, res) => {
+    res.json(await listCustomerOrders(req.customer!.sub));
   }));
 
-  app.get("/api/guest/orders", asyncRoute((req, res) => {
-    res.json(listGuestOrdersByContact(String(req.query.contact || "")));
+  app.get("/api/guest/orders", asyncRoute(async (req, res) => {
+    res.json(await listGuestOrdersByContact(String(req.query.contact || "")));
   }));
 
-  app.post("/api/admin/login", asyncRoute((req, res) => {
+  app.post("/api/admin/login", asyncRoute(async (req, res) => {
     const parsed = loginSchema.parse(req.body);
-    const result = login(parsed.username, parsed.password);
+    const result = await login(parsed.username, parsed.password);
     res.cookie("admin_token", result.token, { httpOnly: true, sameSite: "lax", maxAge: 8 * 60 * 60 * 1000 });
     res.json(result);
   }));
@@ -199,40 +218,41 @@ export function createApp() {
     res.json(req.admin);
   });
 
-  app.get("/api/admin/dashboard", asyncRoute((_req, res) => res.json(getDashboard())));
-  app.get("/api/admin/categories", asyncRoute((_req, res) => res.json(listCategories())));
-  app.post("/api/admin/categories", asyncRoute((req, res) => res.status(201).json(upsertCategory(req.body))));
-  app.patch("/api/admin/categories/:id", asyncRoute((req, res) => res.json(upsertCategory({ ...req.body, id: String(req.params.id) }))));
-  app.delete("/api/admin/categories/:id", asyncRoute((req, res) => res.json(deleteCategory(String(req.params.id)))));
-  app.get("/api/admin/products", asyncRoute((_req, res) => res.json(listAdminProducts())));
-  app.post("/api/admin/products", asyncRoute((req, res) => res.status(201).json(upsertProduct(req.body))));
-  app.patch("/api/admin/products/:id", asyncRoute((req, res) => res.json(upsertProduct({ ...req.body, id: String(req.params.id) }))));
-  app.delete("/api/admin/products/:id", asyncRoute((req, res) => res.json(deleteProduct(String(req.params.id)))));
-  app.post("/api/admin/products/:id/inventory", asyncRoute((req, res) => {
+  app.get("/api/admin/dashboard", asyncRoute(async (_req, res) => res.json(await getDashboard())));
+  app.get("/api/admin/categories", asyncRoute(async (_req, res) => res.json(await listCategories())));
+  app.post("/api/admin/categories", asyncRoute(async (req, res) => res.status(201).json(await upsertCategory(req.body))));
+  app.patch("/api/admin/categories/:id", asyncRoute(async (req, res) => res.json(await upsertCategory({ ...req.body, id: String(req.params.id) }))));
+  app.delete("/api/admin/categories/:id", asyncRoute(async (req, res) => res.json(await deleteCategory(String(req.params.id)))));
+  app.get("/api/admin/products", asyncRoute(async (_req, res) => res.json(await listAdminProducts())));
+  app.post("/api/admin/products", asyncRoute(async (req, res) => res.status(201).json(await upsertProduct(req.body))));
+  app.patch("/api/admin/products/:id", asyncRoute(async (req, res) => res.json(await upsertProduct({ ...req.body, id: String(req.params.id) }))));
+  app.delete("/api/admin/products/:id", asyncRoute(async (req, res) => res.json(await deleteProduct(String(req.params.id)))));
+  app.post("/api/admin/products/:id/inventory", asyncRoute(async (req, res) => {
     const lines = Array.isArray(req.body.lines) ? req.body.lines : String(req.body.lines || "").split(/\r?\n/);
-    res.status(201).json(addInventory(String(req.params.id), lines));
+    res.status(201).json(await addInventory(String(req.params.id), lines));
   }));
-  app.get("/api/admin/inventory", asyncRoute((req, res) => {
-    res.json(listInventory(req.query.productId ? String(req.query.productId) : undefined));
+  app.get("/api/admin/inventory", asyncRoute(async (req, res) => {
+    res.json(await listInventory(req.query.productId ? String(req.query.productId) : undefined));
   }));
-  app.delete("/api/admin/inventory/:id", asyncRoute((req, res) => res.json(deleteInventoryItem(String(req.params.id)))));
-  app.get("/api/admin/orders", asyncRoute((_req, res) => res.json(listOrders())));
-  app.patch("/api/admin/orders/:id", asyncRoute((req, res) => res.json(updateOrderStatus(String(req.params.id), req.body.status))));
-  app.delete("/api/admin/orders/:id", asyncRoute((req, res) => res.json(deleteOrder(String(req.params.id)))));
-  app.get("/api/admin/coupons", asyncRoute((_req, res) => res.json(listCoupons())));
-  app.post("/api/admin/coupons", asyncRoute((req, res) => res.status(201).json(upsertCoupon(req.body))));
-  app.patch("/api/admin/coupons/:id", asyncRoute((req, res) => res.json(upsertCoupon({ ...req.body, id: String(req.params.id) }))));
-  app.delete("/api/admin/coupons/:id", asyncRoute((req, res) => res.json(deleteCoupon(String(req.params.id)))));
-  app.get("/api/admin/payment-methods", asyncRoute((_req, res) => res.json(listPaymentMethods())));
-  app.post("/api/admin/payment-methods", asyncRoute((req, res) => res.status(201).json(upsertPaymentMethod(req.body))));
-  app.patch("/api/admin/payment-methods/:id", asyncRoute((req, res) => res.json(upsertPaymentMethod({ ...req.body, id: String(req.params.id) }))));
-  app.delete("/api/admin/payment-methods/:id", asyncRoute((req, res) => res.json(deletePaymentMethod(String(req.params.id)))));
-  app.get("/api/admin/announcements", asyncRoute((_req, res) => res.json(listAnnouncements())));
-  app.post("/api/admin/announcements", asyncRoute((req, res) => res.status(201).json(upsertAnnouncement(req.body))));
-  app.patch("/api/admin/announcements/:id", asyncRoute((req, res) => res.json(upsertAnnouncement({ ...req.body, id: String(req.params.id) }))));
-  app.delete("/api/admin/announcements/:id", asyncRoute((req, res) => res.json(deleteAnnouncement(String(req.params.id)))));
-  app.get("/api/admin/settings", asyncRoute((_req, res) => res.json(getSettings())));
-  app.patch("/api/admin/settings", asyncRoute((req, res) => res.json(updateSettings(req.body))));
+  app.delete("/api/admin/inventory/:id", asyncRoute(async (req, res) => res.json(await deleteInventoryItem(String(req.params.id)))));
+  app.get("/api/admin/orders", asyncRoute(async (_req, res) => res.json(await listOrders())));
+  app.get("/api/admin/orders/:id/secrets", asyncRoute(async (req, res) => res.json(await getOrderSecrets(String(req.params.id)))));
+  app.patch("/api/admin/orders/:id", asyncRoute(async (req, res) => res.json(await updateOrderStatus(String(req.params.id), req.body.status))));
+  app.delete("/api/admin/orders/:id", asyncRoute(async (req, res) => res.json(await deleteOrder(String(req.params.id)))));
+  app.get("/api/admin/coupons", asyncRoute(async (_req, res) => res.json(await listCoupons())));
+  app.post("/api/admin/coupons", asyncRoute(async (req, res) => res.status(201).json(await upsertCoupon(req.body))));
+  app.patch("/api/admin/coupons/:id", asyncRoute(async (req, res) => res.json(await upsertCoupon({ ...req.body, id: String(req.params.id) }))));
+  app.delete("/api/admin/coupons/:id", asyncRoute(async (req, res) => res.json(await deleteCoupon(String(req.params.id)))));
+  app.get("/api/admin/payment-methods", asyncRoute(async (_req, res) => res.json(await listPaymentMethods())));
+  app.post("/api/admin/payment-methods", asyncRoute(async (req, res) => res.status(201).json(await upsertPaymentMethod(req.body))));
+  app.patch("/api/admin/payment-methods/:id", asyncRoute(async (req, res) => res.json(await upsertPaymentMethod({ ...req.body, id: String(req.params.id) }))));
+  app.delete("/api/admin/payment-methods/:id", asyncRoute(async (req, res) => res.json(await deletePaymentMethod(String(req.params.id)))));
+  app.get("/api/admin/announcements", asyncRoute(async (_req, res) => res.json(await listAnnouncements())));
+  app.post("/api/admin/announcements", asyncRoute(async (req, res) => res.status(201).json(await upsertAnnouncement(req.body))));
+  app.patch("/api/admin/announcements/:id", asyncRoute(async (req, res) => res.json(await upsertAnnouncement({ ...req.body, id: String(req.params.id) }))));
+  app.delete("/api/admin/announcements/:id", asyncRoute(async (req, res) => res.json(await deleteAnnouncement(String(req.params.id)))));
+  app.get("/api/admin/settings", asyncRoute(async (_req, res) => res.json(await getSettings())));
+  app.patch("/api/admin/settings", asyncRoute(async (req, res) => res.json(await updateSettings(req.body))));
 
   app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
     if (error instanceof z.ZodError) {

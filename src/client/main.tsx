@@ -7,6 +7,7 @@ import {
   ChevronLeft,
   Clipboard,
   CreditCard,
+  Eye,
   FileText,
   Gauge,
   Gift,
@@ -35,6 +36,7 @@ import type {
   Category,
   Coupon,
   Customer,
+  DeliveredItem,
   InventoryItem,
   Order,
   PaymentMethod,
@@ -136,7 +138,7 @@ function ShopView({ onAdmin }: { onAdmin: () => void }) {
   const [checkoutProduct, setCheckoutProduct] = useState<Product | null>(null);
   const [quantity, setQuantity] = useState(1);
   const [contact, setContact] = useState("");
-  const [couponCode, setCouponCode] = useState("WELCOME10");
+  const [couponCode, setCouponCode] = useState("");
   const [buyerNote, setBuyerNote] = useState("");
   const [paymentMethod, setPaymentMethod] = useState("mockpay");
   const [activeOrder, setActiveOrder] = useState<Order | null>(null);
@@ -213,10 +215,20 @@ function ShopView({ onAdmin }: { onAdmin: () => void }) {
     setCheckoutProduct(product);
     setQuantity(product.stock > 0 ? 1 : 0);
     setContact(customer?.email || contact);
+    setCouponCode("");
     setActiveOrder(null);
     setError("");
     setMessage("");
     setPage("checkout");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function returnHome() {
+    setError("");
+    setMessage("");
+    setActiveOrder(null);
+    setCheckoutProduct(null);
+    setPage("home");
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
@@ -235,7 +247,7 @@ function ShopView({ onAdmin }: { onAdmin: () => void }) {
           quantity,
           contact,
           buyerNote,
-          couponCode,
+          couponCode: couponCode.trim() || undefined,
           paymentMethod: currentPayment?.code || "mockpay"
         })
       });
@@ -254,7 +266,10 @@ function ShopView({ onAdmin }: { onAdmin: () => void }) {
     setBusy(true);
     setError("");
     try {
-      const delivered = await api<Order>(`/api/payments/mock/${activeOrder.orderNo}/confirm`, { method: "POST" });
+      const delivered = await api<Order>(`/api/payments/mock/${activeOrder.orderNo}/confirm`, {
+        method: "POST",
+        body: JSON.stringify({ paymentToken: activeOrder.paymentToken })
+      });
       setActiveOrder(delivered);
       setMessage("支付成功，系统已自动发货。");
       if (customerToken) void loadAccountOrders();
@@ -278,6 +293,20 @@ function ShopView({ onAdmin }: { onAdmin: () => void }) {
     } catch (err) {
       setGuestOrders([]);
       setError(err instanceof Error ? err.message : "订单查询失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function revealGuestOrder(order: Order) {
+    setBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      const detail = await api<Order>(`/api/orders/${order.orderNo}?contact=${encodeURIComponent(order.contact)}`);
+      setGuestOrders((orders) => orders.map((item) => item.id === detail.id ? detail : item));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "订单详情加载失败");
     } finally {
       setBusy(false);
     }
@@ -313,7 +342,8 @@ function ShopView({ onAdmin }: { onAdmin: () => void }) {
       setCustomer(result.user);
       setContact(result.user.email);
       setMessage(authMode === "register" ? "注册成功，已登录。" : "登录成功。");
-      setPage("orders");
+      setPage("home");
+      window.scrollTo({ top: 0, behavior: "smooth" });
       await loadAccountOrders(result.token);
     } catch (err) {
       setError(err instanceof Error ? err.message : "登录失败");
@@ -337,20 +367,22 @@ function ShopView({ onAdmin }: { onAdmin: () => void }) {
   }
 
   function openOrdersPage() {
+    setError("");
+    setMessage("");
     setPage("orders");
     if (customerToken) void loadAccountOrders();
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
   return (
-    <main className="buyer-shell">
+    <main className={page === "checkout" ? "buyer-shell checkout-shell" : "buyer-shell"}>
       <header className="buyer-topbar">
-        <button className="brand store-badge" type="button" onClick={() => setPage("home")} title="返回首页">
+        <button className="brand store-badge" type="button" onClick={returnHome} title="返回首页">
           <Store size={24} />
           <span>{store?.settings.store_name || "自动发货商城"}</span>
         </button>
         <nav className="buyer-nav">
-          <button className={page === "home" ? "active" : ""} type="button" onClick={() => setPage("home")}>
+          <button className={page === "home" ? "active" : ""} type="button" onClick={returnHome}>
             <Store size={18} />
             首页
           </button>
@@ -402,7 +434,7 @@ function ShopView({ onAdmin }: { onAdmin: () => void }) {
           activeOrder={activeOrder}
           currentPayment={currentPayment}
           busy={busy}
-          onBack={() => setPage("home")}
+          onBack={returnHome}
           onSubmit={submitOrder}
           onConfirm={confirmPayment}
         />
@@ -433,6 +465,7 @@ function ShopView({ onAdmin }: { onAdmin: () => void }) {
           onLookup={lookupGuestOrders}
           onLogin={() => setPage("auth")}
           onRefreshAccount={() => void loadAccountOrders()}
+          onRevealGuest={revealGuestOrder}
         />
       )}
     </main>
@@ -555,144 +588,144 @@ function PaymentPage(props: {
 }) {
   const product = props.product;
   if (!product) return null;
-  const productTags = product.tags.slice(0, 4);
   const deliveryLabel = product.deliveryType === "card" ? "自动交付" : "人工交付";
   const productIntro = product.description || product.subtitle || "商品信息将在订单中记录，支付完成后可在订单详情查看交付内容。";
 
   return (
     <section className="payment-layout">
-      <button className="ghost-button payment-back" type="button" onClick={props.onBack}>
-        <ChevronLeft size={18} />
-        返回商品
-      </button>
-
-      <div className="payment-product">
-        <div className="payment-media">
-          <img src={product.coverUrl || fallbackCover} alt={product.name} />
-          <div className="media-price-bar">
-            <span>商品单价</span>
-            <strong>{money(product.priceCents)}</strong>
-            {product.marketPriceCents > product.priceCents && <del>{money(product.marketPriceCents)}</del>}
-          </div>
-        </div>
-
-        <div className="payment-product-copy">
-          <div className="payment-heading-row">
-            <p className="eyebrow">确认商品</p>
-            <span className="delivery-chip">
-              <Truck size={15} />
-              {deliveryLabel}
-            </span>
-          </div>
-          <h1>{product.name}</h1>
-          <p className="payment-subtitle">{product.subtitle || product.categoryName}</p>
-          <p className="payment-description">{productIntro}</p>
-
-          {productTags.length > 0 && (
-            <div className="payment-tags">
-              {productTags.map((tag) => <span key={tag}>{tag}</span>)}
-            </div>
-          )}
-
-          <div className="detail-strip">
-            <span>库存 <b>{product.stock}</b></span>
-            <span>限购 <b>{product.buyLimit}</b></span>
-            <span>已售 <b>{product.sold}</b></span>
-          </div>
-
-          <div className="checkout-guide">
-            <div className="guide-item">
-              <span>1</span>
-              <div>
-                <strong>提交订单</strong>
-                <small>库存会为你锁定 15 分钟</small>
-              </div>
-            </div>
-            <div className="guide-item">
-              <span>2</span>
-              <div>
-                <strong>完成付款</strong>
-                <small>{product.deliveryType === "card" ? "付款后自动展示发货内容" : "付款后等待人工处理"}</small>
-              </div>
-            </div>
-            <div className="guide-item">
-              <span>3</span>
-              <div>
-                <strong>保存订单</strong>
-                <small>登录用户自动归档，游客可用联系方式查单</small>
-              </div>
-            </div>
-          </div>
-
-          <div className="buyer-assurance">
-            <span><ShieldCheck size={15} /> 库存锁定</span>
-            <span><FileText size={15} /> 可查订单</span>
-            <span><BadgeCheck size={15} /> 支付后发货</span>
-          </div>
-        </div>
-      </div>
-
       <aside className="payment-card">
+        <div className="checkout-card-top">
+          <button className="ghost-button payment-back" type="button" onClick={props.onBack}>
+            <ChevronLeft size={18} />
+            返回商品
+          </button>
+          <span className="delivery-chip">
+            <Truck size={15} />
+            {deliveryLabel}
+          </span>
+        </div>
         {props.activeOrder ? (
-          <Cashier order={props.activeOrder} payment={props.currentPayment} busy={props.busy} onConfirm={props.onConfirm} />
-        ) : (
-          <form className="checkout-form" onSubmit={props.onSubmit}>
-            <div className="login-hint">
-              {props.customer ? `已登录：${props.customer.email}，订单会自动保存到账号。` : "游客可直接购买；登录后订单会自动保存。"}
-            </div>
-            <div className="compact-fields">
-              <label>
-                数量
-                <input
-                  type="number"
-                  min={1}
-                  max={props.maxQuantity}
-                  value={props.quantity}
-                  onChange={(event) => props.setQuantity(Number(event.target.value))}
-                  disabled={product.stock <= 0}
-                />
-              </label>
-              <label>
-                优惠码
-                <input value={props.couponCode} onChange={(event) => props.setCouponCode(event.target.value)} placeholder="WELCOME10" />
-              </label>
-            </div>
-            <label>
-              联系方式
-              <input value={props.contact} onChange={(event) => props.setContact(event.target.value)} placeholder="邮箱或手机号" required />
-            </label>
-            <label>
-              支付方式
-              <div className="payment-grid">
-                {props.paymentMethods.map((method) => (
-                  <button
-                    type="button"
-                    className={props.paymentMethod === method.code ? "payment-option active" : "payment-option"}
-                    key={method.id}
-                    onClick={() => props.setPaymentMethod(method.code)}
-                  >
-                    {paymentIcons[method.icon] || <CreditCard size={18} />}
-                    <span>{method.name}</span>
-                  </button>
-                ))}
+          <div className="checkout-card-body">
+            <div className="checkout-context-panel">
+              <ProductCheckoutSummary product={product} productIntro={productIntro} />
+              <div className="checkout-mini-grid">
+                <div>
+                  <strong>订单已锁定</strong>
+                  <small>{props.activeOrder.orderNo}</small>
+                </div>
+                <div>
+                  <strong>下一步</strong>
+                  <small>{props.activeOrder.status === "delivered" ? "发货内容已生成，可以复制保存。" : "确认支付后会自动发货并显示内容。"}</small>
+                </div>
               </div>
-            </label>
-            <details className="optional-note">
-              <summary>备注（可选）</summary>
-              <textarea value={props.buyerNote} onChange={(event) => props.setBuyerNote(event.target.value)} rows={2} placeholder="可选" />
-            </details>
-            <div className="checkout-total">
-              <span>应付金额</span>
-              <strong>{money(props.subtotal)}</strong>
             </div>
-            <button className="primary-button full" type="submit" disabled={props.busy || product.stock <= 0}>
-              <CreditCard size={18} />
-              {product.stock <= 0 ? "库存不足" : "提交订单"}
-            </button>
-          </form>
+            <Cashier order={props.activeOrder} payment={props.currentPayment} busy={props.busy} onConfirm={props.onConfirm} />
+          </div>
+        ) : (
+          <div className="checkout-card-body">
+            <div className="checkout-context-panel">
+              <ProductCheckoutSummary product={product} productIntro={productIntro} />
+              <div className="login-hint">
+                {props.customer ? `已登录：${props.customer.email}，订单会自动保存到账号。` : "游客可直接购买；登录后订单会自动保存。"}
+              </div>
+              <div className="checkout-summary-card">
+                <div>
+                  <span>商品单价</span>
+                  <strong>{money(product.priceCents)}</strong>
+                </div>
+                <div>
+                  <span>购买数量</span>
+                  <strong>{props.quantity}</strong>
+                </div>
+                <div>
+                  <span>库存剩余</span>
+                  <strong>{product.stock}</strong>
+                </div>
+              </div>
+              <div className="checkout-mini-grid">
+                <div>
+                  <strong>交付流程</strong>
+                  <small>{product.deliveryType === "card" ? "付款后自动展示发货内容，可在订单详情再次查看。" : "付款后进入处理流程，结果会同步到订单详情。"}</small>
+                </div>
+                <div>
+                  <strong>售后凭证</strong>
+                  <small>订单号和联系方式用于查单、补发和售后核验。</small>
+                </div>
+              </div>
+            </div>
+            <form className="checkout-form" onSubmit={props.onSubmit}>
+              <div className="compact-fields">
+                <label>
+                  数量
+                  <input
+                    type="number"
+                    min={1}
+                    max={props.maxQuantity}
+                    value={props.quantity}
+                    onChange={(event) => props.setQuantity(Number(event.target.value))}
+                    disabled={product.stock <= 0}
+                  />
+                </label>
+                <label>
+                  优惠码
+                  <input value={props.couponCode} onChange={(event) => props.setCouponCode(event.target.value)} placeholder="可选，输入优惠码" />
+                </label>
+              </div>
+              <label>
+                联系方式
+                <input value={props.contact} onChange={(event) => props.setContact(event.target.value)} placeholder="邮箱或手机号" required />
+              </label>
+              <label>
+                支付方式
+                <div className="payment-grid">
+                  {props.paymentMethods.map((method) => (
+                    <button
+                      type="button"
+                      className={props.paymentMethod === method.code ? "payment-option active" : "payment-option"}
+                      key={method.id}
+                      onClick={() => props.setPaymentMethod(method.code)}
+                    >
+                      {paymentIcons[method.icon] || <CreditCard size={18} />}
+                      <span>{method.name}</span>
+                    </button>
+                  ))}
+                </div>
+              </label>
+              <details className="optional-note">
+                <summary>备注（可选）</summary>
+                <textarea value={props.buyerNote} onChange={(event) => props.setBuyerNote(event.target.value)} rows={2} placeholder="可选" />
+              </details>
+              <div className="checkout-total">
+                <span>应付金额</span>
+                <strong>{money(props.subtotal)}</strong>
+              </div>
+              <div className="checkout-support">
+                <span><ShieldCheck size={15} /> 下单锁定库存 15 分钟</span>
+                <span><MessageCircle size={15} /> 联系方式用于查单和售后</span>
+              </div>
+              <button className="primary-button full" type="submit" disabled={props.busy || product.stock <= 0}>
+                <CreditCard size={18} />
+                {product.stock <= 0 ? "库存不足" : "提交订单"}
+              </button>
+            </form>
+          </div>
         )}
       </aside>
     </section>
+  );
+}
+
+function ProductCheckoutSummary({ product, productIntro }: { product: Product; productIntro: string }) {
+  return (
+    <div className="checkout-product-summary">
+      <img src={product.coverUrl || fallbackCover} alt={product.name} />
+      <div>
+        <span>订单确认</span>
+        <h1>{product.name}</h1>
+        <p>{product.subtitle || product.categoryName}</p>
+        <small>{productIntro}</small>
+      </div>
+    </div>
   );
 }
 
@@ -820,7 +853,7 @@ function AuthPage({ customer, authMode, setAuthMode, authForm, setAuthForm, busy
   );
 }
 
-function OrdersPage({ customer, accountOrders, guestOrders, lookupContact, setLookupContact, busy, onLookup, onLogin, onRefreshAccount }: {
+function OrdersPage({ customer, accountOrders, guestOrders, lookupContact, setLookupContact, busy, onLookup, onLogin, onRefreshAccount, onRevealGuest }: {
   customer: Customer | null;
   accountOrders: Order[];
   guestOrders: Order[];
@@ -830,6 +863,7 @@ function OrdersPage({ customer, accountOrders, guestOrders, lookupContact, setLo
   onLookup: (event: FormEvent) => void;
   onLogin: () => void;
   onRefreshAccount: () => void;
+  onRevealGuest: (order: Order) => void;
 }) {
   return (
     <section className="orders-page">
@@ -854,26 +888,35 @@ function OrdersPage({ customer, accountOrders, guestOrders, lookupContact, setLo
           </form>
         )}
       </div>
-      <OrderList orders={customer ? accountOrders : guestOrders} />
+      <OrderList orders={customer ? accountOrders : guestOrders} onReveal={customer ? undefined : onRevealGuest} />
     </section>
   );
 }
 
-function OrderList({ orders }: { orders: Order[] }) {
+function OrderList({ orders, onReveal }: { orders: Order[]; onReveal?: (order: Order) => void }) {
   if (orders.length === 0) return <div className="empty-state">暂无订单</div>;
   return (
     <div className="order-card-list">
-      {orders.map((order) => (
-        <article className="order-card" key={order.id}>
-          <div>
-            <h2>{order.productName}</h2>
-            <p>{order.orderNo} · {order.contact}</p>
-          </div>
-          <b className={`status ${order.status}`}>{statusText[order.status]}</b>
-          <strong>{money(order.totalCents)}</strong>
-          {order.deliveredPayload.length > 0 && <DeliveryList order={order} />}
-        </article>
-      ))}
+      {orders.map((order) => {
+        const hasMaskedSecrets = order.deliveredPayload.some((item) => item.secret.includes("****"));
+        return (
+          <article className="order-card" key={order.id}>
+            <div>
+              <h2>{order.productName}</h2>
+              <p>{order.orderNo} · {order.contact}</p>
+            </div>
+            <b className={`status ${order.status}`}>{statusText[order.status]}</b>
+            <strong>{money(order.totalCents)}</strong>
+            {order.deliveredPayload.length > 0 && hasMaskedSecrets && onReveal && (
+              <button className="ghost-button" type="button" onClick={() => onReveal(order)}>
+                <Eye size={15} />
+                查看发货内容
+              </button>
+            )}
+            {order.deliveredPayload.length > 0 && (!hasMaskedSecrets || !onReveal) && <DeliveryList order={order} />}
+          </article>
+        );
+      })}
     </div>
   );
 }
@@ -1261,6 +1304,7 @@ function AdminPanel({ onBack }: { onBack: () => void }) {
         )}
         {tab === "orders" && (
           <OrdersAdmin
+            token={token}
             orders={orders}
             onStatus={(orderId, status) => mutate(() => api(`/api/admin/orders/${orderId}`, {
               token,
@@ -1552,6 +1596,8 @@ function InventoryAdmin({ products, inventory, productId, setProductId, lines, s
   onDelete: (item: InventoryItem) => void;
 }) {
   const selected = products.find((product) => product.id === productId);
+  const visibleInventory = inventory.filter((item) => item.productId === productId);
+  const inventoryTitle = selected ? `${selected.name} 库存` : "最近库存";
   return (
     <div className="admin-two-col">
       <form className="admin-section" onSubmit={onSubmit}>
@@ -1573,34 +1619,46 @@ function InventoryAdmin({ products, inventory, productId, setProductId, lines, s
         </button>
       </form>
       <section className="admin-section">
-        <h2>最近库存</h2>
+        <div className="section-head">
+          <div>
+            <h2>{inventoryTitle}</h2>
+            <span>{selected ? `${selected.categoryName || "未分类"} · 当前显示 ${visibleInventory.length} 条卡密` : "请选择商品查看库存"}</span>
+          </div>
+        </div>
         <div className="inventory-list">
-          {inventory.slice(0, 100).map((item) => (
-            <div className="inventory-row" key={item.id}>
-              <span>
-                <strong>{item.productName}</strong>
-                <code>{item.secret}</code>
-              </span>
-              <b className={`status ${item.status}`}>{statusText[item.status]}</b>
-              <div className="row-actions">
-                <button className="danger-button" type="button" onClick={() => onDelete(item)}>
-                  <Trash2 size={15} />
-                  删除
-                </button>
+          {visibleInventory.length === 0 ? (
+            <div className="empty-state">当前商品暂无库存卡密</div>
+          ) : (
+            visibleInventory.slice(0, 100).map((item) => (
+              <div className="inventory-row" key={item.id}>
+                <span>
+                  <strong>{item.productName}</strong>
+                  <code>{item.secret}</code>
+                </span>
+                <b className={`status ${item.status}`}>{statusText[item.status]}</b>
+                <div className="row-actions">
+                  <button className="danger-button" type="button" onClick={() => onDelete(item)}>
+                    <Trash2 size={15} />
+                    删除
+                  </button>
+                </div>
               </div>
-            </div>
-          ))}
+            ))
+          )}
         </div>
       </section>
     </div>
   );
 }
 
-function OrdersAdmin({ orders, onStatus, onDelete }: {
+function OrdersAdmin({ token, orders, onStatus, onDelete }: {
+  token: string;
   orders: Order[];
   onStatus: (orderId: string, status: string) => void;
   onDelete: (order: Order) => void;
 }) {
+  const [secretOrder, setSecretOrder] = useState<Order | null>(null);
+
   return (
     <section className="admin-section">
       <h2>订单列表</h2>
@@ -1613,6 +1671,7 @@ function OrdersAdmin({ orders, onStatus, onDelete }: {
               <th>金额</th>
               <th>支付</th>
               <th>联系</th>
+              <th>发货卡密</th>
               <th>状态</th>
               <th>操作</th>
             </tr>
@@ -1625,6 +1684,7 @@ function OrdersAdmin({ orders, onStatus, onDelete }: {
                 <td>{money(order.totalCents)}</td>
                 <td>{order.paymentMethod}</td>
                 <td>{order.contact}</td>
+                <td><AdminDeliverySecrets order={order} onOpen={() => setSecretOrder(order)} /></td>
                 <td><b className={`status ${order.status}`}>{statusText[order.status]}</b></td>
                 <td>
                   <div className="row-actions">
@@ -1641,7 +1701,96 @@ function OrdersAdmin({ orders, onStatus, onDelete }: {
           </tbody>
         </table>
       </div>
+      {secretOrder && <AdminSecretModal token={token} order={secretOrder} onClose={() => setSecretOrder(null)} />}
     </section>
+  );
+}
+
+function AdminDeliverySecrets({ order, onOpen }: { order: Order; onOpen: () => void }) {
+  if (!order.deliveredPayload.length) {
+    return <span className="admin-secret-empty">{order.status === "delivered" ? "暂无卡密记录" : "未发货"}</span>;
+  }
+
+  return (
+    <button className="admin-secret-trigger" type="button" onClick={onOpen}>
+      <Eye size={15} />
+      查看卡密
+      <span>{order.deliveredPayload.length}</span>
+    </button>
+  );
+}
+
+function AdminSecretModal({ token, order, onClose }: { token: string; order: Order; onClose: () => void }) {
+  const [items, setItems] = useState(order.deliveredPayload);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const secretText = items.map((item) => item.secret).join("\n");
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    setError("");
+    api<DeliveredItem[]>(`/api/admin/orders/${order.id}/secrets`, { token })
+      .then((payload) => {
+        if (active) setItems(payload);
+      })
+      .catch((err) => {
+        if (active) setError(err instanceof Error ? err.message : "卡密加载失败");
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [order.id, token]);
+
+  return (
+    <div className="admin-modal-backdrop" role="presentation" onClick={onClose}>
+      <section
+        className="admin-secret-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`${order.orderNo} 发货卡密`}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="admin-secret-modal-head">
+          <div>
+            <span>发货卡密</span>
+            <h3>{order.productName} × {order.quantity}</h3>
+            <p>{order.orderNo} · {order.contact}</p>
+          </div>
+          <button className="icon-button" type="button" title="关闭" onClick={onClose}>
+            <X size={18} />
+          </button>
+        </div>
+        <div className="admin-secret-modal-list">
+          {loading && <div className="empty-state">正在加载卡密...</div>}
+          {!loading && error && <div className="alert error">{error}</div>}
+          {!loading && !error && items.map((item, index) => (
+            <div className="admin-secret-row" key={`${item.id}-${index}`}>
+              <span>{index + 1}</span>
+              <code title={item.secret}>{item.secret}</code>
+              <button
+                className="icon-button"
+                type="button"
+                title="复制卡密"
+                onClick={() => void navigator.clipboard.writeText(item.secret)}
+              >
+                <Clipboard size={14} />
+              </button>
+            </div>
+          ))}
+        </div>
+        <div className="admin-secret-modal-actions">
+          <button className="ghost-button" type="button" onClick={() => void navigator.clipboard.writeText(secretText)} disabled={loading || !secretText}>
+            <Clipboard size={16} />
+            复制全部
+          </button>
+          <button className="primary-button" type="button" onClick={onClose}>关闭</button>
+        </div>
+      </section>
+    </div>
   );
 }
 

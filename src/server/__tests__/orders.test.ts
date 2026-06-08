@@ -4,7 +4,7 @@ import path from "node:path";
 import request from "supertest";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "../app";
-import { closeDb } from "../db";
+import { closeDb, getDb } from "../db";
 
 describe("order delivery flow", () => {
   let tempDir: string;
@@ -14,8 +14,8 @@ describe("order delivery flow", () => {
     process.env.DATABASE_PATH = path.join(tempDir, "test.sqlite");
   });
 
-  afterEach(() => {
-    closeDb();
+  afterEach(async () => {
+    await closeDb();
     fs.rmSync(tempDir, { recursive: true, force: true });
     delete process.env.DATABASE_PATH;
   });
@@ -38,13 +38,25 @@ describe("order delivery flow", () => {
     expect(created.body.status).toBe("pending");
     expect(created.body.deliveredPayload).toEqual([]);
     expect(created.body.discountCents).toBeGreaterThan(0);
+    expect(created.body.paymentToken).toBeTruthy();
+
+    await request(app)
+      .post(`/api/payments/mock/${created.body.orderNo}/confirm`)
+      .send({ paymentToken: "wrong-token-that-is-long-enough" })
+      .expect(400);
 
     const delivered = await request(app)
       .post(`/api/payments/mock/${created.body.orderNo}/confirm`)
+      .send({ paymentToken: created.body.paymentToken })
       .expect(200);
 
     expect(delivered.body.status).toBe("delivered");
     expect(delivered.body.deliveredPayload).toHaveLength(2);
+
+    const anonymous = await request(app)
+      .get(`/api/orders/${created.body.orderNo}`)
+      .expect(200);
+    expect(anonymous.body.deliveredPayload).toEqual([]);
 
     const queried = await request(app)
       .get(`/api/orders/${created.body.orderNo}`)
@@ -52,6 +64,25 @@ describe("order delivery flow", () => {
       .expect(200);
 
     expect(queried.body.deliveredPayload[0].secret).toContain("KEY-");
+
+    const adminLogin = await request(app)
+      .post("/api/admin/login")
+      .send({ username: "admin", password: "ChangeMe123!" })
+      .expect(200);
+
+    const adminOrders = await request(app)
+      .get("/api/admin/orders")
+      .set("Authorization", `Bearer ${adminLogin.body.token}`)
+      .expect(200);
+    const adminOrder = adminOrders.body.find((order: any) => order.orderNo === created.body.orderNo);
+    expect(adminOrder.deliveredPayload[0].secret).not.toBe(queried.body.deliveredPayload[0].secret);
+    expect(adminOrder.deliveredPayload[0].secret).toContain("****");
+
+    const adminSecrets = await request(app)
+      .get(`/api/admin/orders/${adminOrder.id}/secrets`)
+      .set("Authorization", `Bearer ${adminLogin.body.token}`)
+      .expect(200);
+    expect(adminSecrets.body[0].secret).toBe(queried.body.deliveredPayload[0].secret);
   });
 
   it("requires admin authentication for management APIs", async () => {
@@ -153,6 +184,13 @@ describe("order delivery flow", () => {
       .set("Authorization", `Bearer ${token}`)
       .query({ productId: product.body.id })
       .expect(200);
+    expect(inventory.body[0].secret).not.toBe("DELETE-SECRET-1");
+    expect(inventory.body[0].secret).toContain("****");
+
+    const db = await getDb();
+    const rawInventory = await db.get<any>("SELECT secret FROM inventory_items WHERE id = ?", [inventory.body[0].id]);
+    expect(rawInventory.secret).toMatch(/^enc:v1:/);
+
     await request(app)
       .delete(`/api/admin/inventory/${inventory.body[0].id}`)
       .set("Authorization", `Bearer ${token}`)
@@ -218,6 +256,80 @@ describe("order delivery flow", () => {
     expect(orders.body.some((order: any) => order.id === pendingOrder.body.id)).toBe(false);
   });
 
+  it("prevents zero-total checkout and unsafe coupon configuration", async () => {
+    const app = createApp();
+    const store = await request(app).get("/api/store").expect(200);
+    const product = store.body.products[0];
+
+    const login = await request(app)
+      .post("/api/admin/login")
+      .send({ username: "admin", password: "ChangeMe123!" })
+      .expect(200);
+    const token = login.body.token;
+
+    await request(app)
+      .post("/api/admin/coupons")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ code: "FREE100", type: "percent", value: 100, minAmountCents: 0, totalLimit: 1, isActive: true })
+      .expect(400);
+
+    const hugeCoupon = await request(app)
+      .post("/api/admin/coupons")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ code: "HUGE999", type: "fixed", value: 999999, minAmountCents: 0, totalLimit: 3, isActive: true })
+      .expect(201);
+    expect(hugeCoupon.body.code).toBe("HUGE999");
+
+    const order = await request(app)
+      .post("/api/orders")
+      .send({
+        productId: product.id,
+        quantity: 1,
+        contact: "coupon-hardening@example.com",
+        couponCode: "HUGE999",
+        paymentMethod: "mockpay"
+      })
+      .expect(201);
+    expect(order.body.totalCents).toBe(1);
+
+    await request(app)
+      .post("/api/admin/products")
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        categoryId: store.body.categories[0].id,
+        name: "Free Product",
+        slug: "free-product",
+        subtitle: "Unsafe",
+        description: "Unsafe product",
+        priceCents: 0,
+        marketPriceCents: 0,
+        coverUrl: "",
+        tags: ["temp"],
+        buyLimit: 1,
+        isActive: true,
+        sortOrder: 1
+      })
+      .expect(400);
+  });
+
+  it("encrypts legacy plaintext inventory during startup migration", async () => {
+    const app = createApp();
+    const store = await request(app).get("/api/store").expect(200);
+    const db = await getDb();
+    await db.run(
+      "INSERT INTO inventory_items (id, product_id, secret, status, created_at) VALUES (?, ?, ?, 'available', ?)",
+      ["legacy_plain_secret", store.body.products[0].id, "LEGACY-PLAIN-SECRET", new Date().toISOString()]
+    );
+    await closeDb();
+
+    const restarted = createApp();
+    await request(restarted).get("/api/store").expect(200);
+    const restartedDb = await getDb();
+    const rawInventory = await restartedDb.get<any>("SELECT secret FROM inventory_items WHERE id = ?", ["legacy_plain_secret"]);
+    expect(rawInventory.secret).toMatch(/^enc:v1:/);
+    expect(rawInventory.secret).not.toContain("LEGACY-PLAIN-SECRET");
+  });
+
   it("supports customer accounts while keeping guest contact lookup", async () => {
     const app = createApp();
     const store = await request(app).get("/api/store").expect(200);
@@ -239,7 +351,10 @@ describe("order delivery flow", () => {
       })
       .expect(201);
 
-    await request(app).post(`/api/payments/mock/${memberOrder.body.orderNo}/confirm`).expect(200);
+    await request(app)
+      .post(`/api/payments/mock/${memberOrder.body.orderNo}/confirm`)
+      .send({ paymentToken: memberOrder.body.paymentToken })
+      .expect(200);
 
     const accountOrders = await request(app)
       .get("/api/account/orders")
@@ -257,7 +372,10 @@ describe("order delivery flow", () => {
         paymentMethod: "mockpay"
       })
       .expect(201);
-    await request(app).post(`/api/payments/mock/${guestOrder.body.orderNo}/confirm`).expect(200);
+    await request(app)
+      .post(`/api/payments/mock/${guestOrder.body.orderNo}/confirm`)
+      .send({ paymentToken: guestOrder.body.paymentToken })
+      .expect(200);
 
     const guestLookup = await request(app)
       .get("/api/guest/orders")
@@ -265,5 +383,12 @@ describe("order delivery flow", () => {
       .expect(200);
     expect(guestLookup.body).toHaveLength(1);
     expect(guestLookup.body[0].orderNo).toBe(guestOrder.body.orderNo);
+    expect(guestLookup.body[0].deliveredPayload[0].secret).toContain("****");
+
+    const guestDetail = await request(app)
+      .get(`/api/orders/${guestOrder.body.orderNo}`)
+      .query({ contact: "guest-contact@example.com" })
+      .expect(200);
+    expect(guestDetail.body.deliveredPayload[0].secret).toContain("KEY-");
   });
 });

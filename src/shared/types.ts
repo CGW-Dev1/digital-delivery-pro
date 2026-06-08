@@ -88,6 +88,7 @@ export interface Order {
   expiresAt: string;
   paidAt: string | null;
   deliveredAt: string | null;
+  paymentToken?: string;
 }
 
 export interface Customer {

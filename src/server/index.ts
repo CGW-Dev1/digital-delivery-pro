@@ -2,7 +2,7 @@ import { createApp } from "./app";
 import { config } from "./config";
 import { getDb } from "./db";
 
-getDb();
+await getDb();
 
 const app = createApp();
 
