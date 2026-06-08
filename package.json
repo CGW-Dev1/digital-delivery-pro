@@ -1,0 +1,57 @@
+{
+  "name": "digital-delivery-pro",
+  "version": "0.1.0",
+  "description": "A modern virtual goods delivery storefront with reserved stock, mock payments, and admin operations.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently -k -n API,WEB -c green,cyan \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:api": "tsx watch src/server/index.ts",
+    "dev:web": "vite --host 127.0.0.1",
+    "start": "tsx src/server/index.ts",
+    "build": "tsc --noEmit && vite build",
+    "test": "vitest run"
+  },
+  "keywords": [
+    "virtual-goods",
+    "auto-delivery",
+    "faka",
+    "react",
+    "express"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@vitejs/plugin-react": "^6.0.2",
+    "bcryptjs": "^3.0.3",
+    "better-sqlite3": "^12.10.0",
+    "concurrently": "^10.0.3",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.6",
+    "date-fns": "^4.4.0",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.3",
+    "lucide-react": "^1.17.0",
+    "nanoid": "^5.1.11",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.16",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/cookie-parser": "^1.4.10",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^25.9.2",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@types/supertest": "^7.2.0",
+    "jsdom": "^29.1.1",
+    "supertest": "^7.2.2",
+    "vitest": "^4.1.8"
+  }
+}
